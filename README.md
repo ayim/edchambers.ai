@@ -1,12 +1,19 @@
 # LangChain Project
 
-This is a Python project set up with LangChain dependencies for building applications with Large Language Models (LLMs).
+This is a Python project set up with LangChain dependencies for building applications with Large Language Models (LLMs). This project requires Python 3.11.
+
+## Prerequisites
+
+Ensure you have Python 3.11 installed. If using Homebrew on macOS:
+```bash
+brew install python@3.11
+```
 
 ## Setup
 
-1. Create a virtual environment:
+1. Create a virtual environment with Python 3.11:
 ```bash
-python -m venv venv
+/opt/homebrew/opt/python@3.11/bin/python3.11 -m venv venv
 source venv/bin/activate  # On Unix/macOS
 # or
 .\venv\Scripts\activate  # On Windows
