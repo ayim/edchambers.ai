@@ -6,87 +6,30 @@ from langmem import create_manage_memory_tool, create_search_memory_tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from dotenv import load_dotenv
-from enum import Enum
-from dataclasses import dataclass
-from datetime import datetime
-import json
+from langchain.tools import Tool, StructuredTool
+from langchain_core.tools import ToolException
+from pydantic import BaseModel, Field
 import os
+
+# Import video and interrupt services
+from src.video.OBS_media_player_loop import MediaPlayer
+from src.interrupt.interrupt_service import handle_interruption
 
 # Load environment variables
 load_dotenv()
 
-# Tools
-# from ..services.voice.text_to_speech import TextToSpeechService
-# from ..services.voice.speech_to_text import SpeechToTextService
-# from ..services.video.obs_controller import OBSController
-# from ..services.memory.objection_tracker import ObjectionTracker
-
 llm = ChatGroq(temperature=0, model_name="llama-3.3-70b-versatile")
 
-class MemoryType(Enum):
-    OBJECTION = "objection"
-    RESPONSE = "response"
-    SENTIMENT = "sentiment"
-    BACKGROUND = "background"
-    FOLLOWUP = "followup"
+# Define input schemas for tools
+class VideoPlaybackInput(BaseModel):
+    video_folder: str = Field(
+        description="Path to folder containing MP4 files to play in sequence"
+    )
 
-@dataclass
-class Memory:
-    type: MemoryType
-    content: str
-    metadata: Dict[str, Any]
-    timestamp: datetime = datetime.now()
-    
-    def to_string(self) -> str:
-        return (
-            f"Type: {self.type.value}\n"
-            f"Content: {self.content}\n"
-            f"Context: {json.dumps(self.metadata, indent=2)}\n"
-            f"When: {self.timestamp.isoformat()}"
-        )
-
-class MemoryManager:
-    def __init__(self, store: InMemoryStore, namespace: Tuple[str, ...]):
-        self.store = store
-        self.namespace = namespace
-        self.memory_tools = [
-            create_manage_memory_tool(namespace),
-            create_search_memory_tool(namespace)
-        ]
-    
-    async def add_memory(self, memory: Memory):
-        'Add a new memory to the store'
-        await self.store.add(
-            self.namespace,
-            memory.to_string(),
-            metadata={
-                "type": memory.type.value,
-                "timestamp": memory.timestamp.isoformat(),
-                **memory.metadata
-            }
-        )
-    
-    async def search_memories(self, query: str, memory_type: MemoryType = None) -> List[Memory]:
-        'Search memories with optional type filter'
-        filter_dict = {"type": memory_type.value} if memory_type else {}
-        items = await self.store.search(
-            self.namespace,
-            query=query,
-            filter_dict=filter_dict
-        )
-        return items
-
-    async def get_recent_memories(self, memory_type: MemoryType = None, limit: int = 5) -> List[Memory]:
-        'Get most recent memories of a specific type'
-        filter_dict = {"type": memory_type.value} if memory_type else {}
-        items = await self.store.search(
-            self.namespace,
-            query="",  # Empty query to get all
-            filter_dict=filter_dict,
-            sort_by="timestamp",
-            limit=limit
-        )
-        return items
+class InterruptionInput(BaseModel):
+    interruption_text: str = Field(
+        description="The text of the user's interruption that needs to be handled"
+    )
 
 class SalesAgent:
     def __init__(self):
@@ -98,24 +41,27 @@ class SalesAgent:
             }
         )
         
-        # Initialize memory manager
-        self.memory_manager = MemoryManager(
-            store=self.store,
-            namespace=("sales_agent_memories",)
-        )
+        # Initialize MediaPlayer
+        self.media_player = MediaPlayer()
         
-        # Initialize services
-        self.tts = TextToSpeechService()
-        self.stt = SpeechToTextService()
-        self.obs = OBSController()
-        self.objection_tracker = ObjectionTracker()
-        
-        # Tools include memory tools
-        self.tools = self.memory_manager.memory_tools + [
-            self.tts.speak,
-            self.obs.pause_video,
-            self.obs.resume_video,
-            self.objection_tracker.record_objection
+        # Create tools with proper schemas
+        self.tools = [
+            StructuredTool.from_function(
+                func=self.media_player.play_videos,
+                name="play_videos",
+                description="Play a sequence of videos from a specified folder in a loop",
+                args_schema=VideoPlaybackInput,
+                handle_tool_error=True,
+                return_direct=False
+            ),
+            StructuredTool.from_function(
+                func=handle_interruption,
+                name="handle_interruption",
+                description="Handle user interruption during video playback by pausing and addressing the interruption",
+                args_schema=InterruptionInput,
+                handle_tool_error=True,
+                return_direct=False
+            )
         ]
         
         # Checkpoint saver for persistence
@@ -124,47 +70,22 @@ class SalesAgent:
         # Initialize the agent workflow
         self.workflow = self._create_workflow()
 
-    async def _create_prompt(self, state: Dict[str, Any]) -> List[Dict[str, str]]:
-        'Create the prompt with relevant memories and context'
-        # Get relevant memories for the current context
-        current_msg = state["messages"][-1].content
-        
-        # Search for different types of relevant memories
-        objection_memories = await self.memory_manager.search_memories(
-            current_msg, 
-            memory_type=MemoryType.OBJECTION
-        )
-        response_memories = await self.memory_manager.search_memories(
-            current_msg, 
-            memory_type=MemoryType.RESPONSE
-        )
-        background_memories = await self.memory_manager.search_memories(
-            current_msg, 
-            memory_type=MemoryType.BACKGROUND
-        )
-        
-        # Format memories by type
-        memories_str = (
-            f"## Recent Objections:\n"
-            f"{chr(10).join(str(m) for m in objection_memories[:3])}\n\n"
-            f"## Successful Responses:\n"
-            f"{chr(10).join(str(m) for m in response_memories[:3])}\n\n"
-            f"## Background Information:\n"
-            f"{chr(10).join(str(m) for m in background_memories[:3])}"
-        )
-        
-        # Create system message with memories and role
+    def _create_prompt(self, state: Dict[str, Any]) -> List[Dict[str, str]]:
+        'Create the prompt with relevant context'
         system_msg = {
             "role": "system",
             "content": (
-                f"You are an AI Sales Representative. Use memories and context to have natural sales conversations.\n\n"
-                f"## Memories:\n"
-                f"{memories_str}\n\n"
+                f"You are an AI Sales Representative that plays a sequence of videos.\n\n"
+                f"## Primary Functions:\n"
+                f"1. Play videos in sequence using the play_videos function\n"
+                f"2. When an interruption is detected, call handle_interruption\n\n"
                 f"## Guidelines:\n"
-                f"- Listen actively for objections and interruptions\n"
-                f"- Use past interaction context to improve responses\n"
-                f"- Maintain a professional and empathetic tone\n"
-                f"- Know when to escalate to human sales rep"
+                f"- Monitor for interruptions during video playback\n"
+                f"- Pause video sequence when interrupted\n"
+                f"- Resume video sequence after interruption is handled\n\n"
+                f"## Error Handling:\n"
+                f"- If video playback fails, report the error and try again\n"
+                f"- If interruption handling fails, escalate to human operator"
             )
         }
         
@@ -195,69 +116,28 @@ class SalesAgent:
         
         return workflow.compile()
 
-    async def handle_message(self, message: str) -> str:
-        'Handle incoming message and return response'
-        # Initialize state
+    async def start_sales_pitch(self, video_folder: str):
+        'Start the sales pitch by playing videos from the specified folder'
+        # Initialize state to start video playback
         state = {
-            "messages": [{"role": "user", "content": message}]
+            "messages": [{
+                "role": "user", 
+                "content": f"Start playing the sales pitch videos from folder: {video_folder}"
+            }]
         }
         
         # Run the workflow
-        result = await self.workflow.invoke(state)
+        await self.workflow.invoke(state)
+    
+    async def handle_user_interruption(self, interruption_text: str):
+        'Handle user interruption during video playback'
+        # Create state for interruption handling
+        state = {
+            "messages": [{
+                "role": "user",
+                "content": f"Interruption detected: {interruption_text}"
+            }]
+        }
         
-        # Store the response as a memory
-        response = result["messages"][-1]["content"]
-        await self.memory_manager.add_memory(
-            Memory(
-                type=MemoryType.RESPONSE,
-                content=response,
-                metadata={
-                    "user_message": message,
-                    "successful": True  # This should be determined by feedback
-                }
-            )
-        )
-        
-        return response
-
-    async def handle_interruption(self, interruption: str) -> str:
-        'Handle interruptions during sales pitch'
-        # Record the objection as a memory
-        await self.memory_manager.add_memory(
-            Memory(
-                type=MemoryType.OBJECTION,
-                content=interruption,
-                metadata={
-                    "context": "interruption",
-                    "handled": False
-                }
-            )
-        )
-        
-        # Pause video
-        await self.obs.pause_video()
-        
-        # Get agent response
-        response = await self.handle_message(
-            f"INTERRUPTION: {interruption}\n"
-            f"Please handle this objection appropriately."
-        )
-        
-        # Update objection memory as handled
-        await self.memory_manager.add_memory(
-            Memory(
-                type=MemoryType.RESPONSE,
-                content=response,
-                metadata={
-                    "objection": interruption,
-                    "context": "interruption_response",
-                    "handled": True
-                }
-            )
-        )
-        
-        # Resume video if appropriate
-        if "RESUME_VIDEO" in response:
-            await self.obs.resume_video()
-            
-        return response
+        # Run the workflow to handle interruption
+        await self.workflow.invoke(state)

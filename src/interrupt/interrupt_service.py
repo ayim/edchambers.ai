@@ -1,10 +1,9 @@
-from typing import Annotated
-from typing_extensions import TypedDict
+from typing import Dict, Any
 from langchain_core.messages import HumanMessage, AIMessage
-
 from langchain_groq import ChatGroq
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
 
-llm = ChatGroq(temperature=0, model_name="deepseek-r1-distill-llama-70b")
-
+async def handle_interruption(interruption_text: str) -> str:
+    'Handle user interruption during video playback'
+    # TODO: Implement actual interruption handling logic
+    # For now, just return a placeholder response
+    return f"Handling interruption: {interruption_text}"
