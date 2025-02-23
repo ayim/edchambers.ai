@@ -8,6 +8,13 @@ groq>=0.3.0
 sounddevice>=0.4.6
 soundfile>=0.12.1
 
+# Agentic workflow
+langchain_core
+langchain_groq
+langsmith
+langraph
+
+
 # Video processing
 python-obs-websocket>=1.0.0
 
