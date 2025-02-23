@@ -80,3 +80,6 @@ coverage.xml
 
 # windsurf rules
 .windsurfrules
+
+# Generated files
+output/videos/
