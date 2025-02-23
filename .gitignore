@@ -77,3 +77,6 @@ coverage.xml
 
 # Jupyter Notebook
 .ipynb_checkpoints
+
+# windsurf rules
+.windsurfrules
